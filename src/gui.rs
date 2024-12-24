@@ -91,7 +91,7 @@ impl GuiRenderer {
         });
 
         self.renderer.render(&mut render_pass.forget_lifetime(), &tris, &screen_descriptor);
-        // drop(render_pass);
+        
         for x in &full_output.textures_delta.free {
             self.renderer.free_texture(x);
         }
