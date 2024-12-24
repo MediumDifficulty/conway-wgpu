@@ -1,0 +1,14 @@
+{
+    "cSpell.words": [
+        "egui",
+        "wgpu"
+    ],
+    "wgsl-analyzer.diagnostics.nagaParsingErrors": false,
+    // "wgsl-analyzer.diagnostics.nagaParsingErrors": true,
+    // "wgsl-analyzer.diagnostics.nagaValidationErrors": true,
+    // "wgsl-analyzer.diagnostics.typeErrors": true,
+    // "wgsl-analyzer.inlayHints.enabled": true,
+    // "wgsl-analyzer.inlayHints.parameterHints": true,
+    // "wgsl-analyzer.inlayHints.structLayoutHints": true,
+    "wgsl-analyzer.diagnostics.nagaVersion": "main"
+}
