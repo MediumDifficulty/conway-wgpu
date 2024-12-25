@@ -3,8 +3,11 @@ use egui_wgpu::ScreenDescriptor;
 use egui_winit::{winit::{event::WindowEvent, window::Window}, State};
 use wgpu::{CommandEncoder, Device, Queue, SurfaceConfiguration, TextureFormat, TextureView};
 
+use crate::{RendererContext, WORLD_SIZE};
+
 // https://github.com/ejb004/egui-wgpu-demo/blob/master/src/gui.rs
 pub struct GuiRenderer {
+    pub enabled: bool,
     pub context: egui::Context,
     state: egui_winit::State,
     renderer: egui_wgpu::Renderer
@@ -38,24 +41,27 @@ impl GuiRenderer {
         Self {
             context: egui_context,
             state: egui_state,
-            renderer: egui_renderer
+            renderer: egui_renderer,
+            enabled: true
         }
     }
 
-    pub fn handle_input(&mut self, window: &Window, event: &WindowEvent) {
-        let _ = self.state.on_window_event(window, event);
+    pub fn handle_input(&mut self, window: &Window, event: &WindowEvent) -> bool {
+        self.state.on_window_event(window, event).consumed
     }
 
     pub fn draw(
         &mut self,
+        renderer: &RendererContext,
         window: &Window,
-        device: &Device,
-        queue: &Queue,
-        config: &SurfaceConfiguration,
         mut run_ui: impl FnMut(&Context),
         encoder: &mut CommandEncoder,
         output_view: &TextureView,
     ) {
+        if !self.enabled {
+            return;
+        }
+
         let raw_input = self.state.take_egui_input(&window);
         let full_output = self.context.run(raw_input, |ui| {
             run_ui(ui);
@@ -65,15 +71,15 @@ impl GuiRenderer {
 
         let tris = self.context.tessellate(full_output.shapes, full_output.pixels_per_point);
         for (id, image_delta) in &full_output.textures_delta.set {
-            self.renderer.update_texture(device, queue, *id, image_delta);
+            self.renderer.update_texture(&renderer.device, &renderer.queue, *id, image_delta);
         }
 
         let screen_descriptor = ScreenDescriptor {
             pixels_per_point: window.scale_factor() as f32,
-            size_in_pixels: [config.width, config.height]
+            size_in_pixels: [renderer.config.width, renderer.config.height]
         };
 
-        self.renderer.update_buffers(device, queue, encoder, &tris, &screen_descriptor);
+        self.renderer.update_buffers(&renderer.device, &renderer.queue, encoder, &tris, &screen_descriptor);
         
         let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -98,25 +104,38 @@ impl GuiRenderer {
     }
 }
 
-pub fn gui(ui: &Context) {
-    egui::Window::new("Conway")
+#[derive(Default)]
+pub struct UiState {
+    pub elapsed_frame_time: f32,
+    pub frames: usize
+}
+
+impl UiState {
+    pub fn draw(&mut self, ctx: &Context) {
+        if self.elapsed_frame_time > 1. {
+            self.frames = 0;
+            self.elapsed_frame_time = 0.;
+        }
+
+        egui::Window::new("Settings")
         // .vscroll(true)
         .default_open(true)
-        .max_width(1000.0)
-        .max_height(800.0)
+        // .min_width(1000.0)
+        // .min_height(800.0)
         .default_width(800.0)
         .resizable(true)
         .anchor(Align2::LEFT_TOP, [0.0, 0.0])
-        .show(&ui, |ui| {
-            if ui.add(egui::Button::new("Click me")).clicked() {
-                println!("PRESSED")
-            }
-            let mut a = 0;
-            ui.label("Slider");
-            ui.add(egui::Slider::new(&mut a, 0..=120).text("age"));
-            ui.label(format!("{a}"));
+        .show(&ctx, |ui| {
+            let secs_per_frame = self.elapsed_frame_time / self.frames as f32;
+            ui.label(format!("ms / frame: {}ms", ((secs_per_frame * 1000. * 100.).round() / 100.)));
+            ui.label(format!("Gc / s: {}", (WORLD_SIZE.element_product() as f64 / secs_per_frame as f64 / 1e9 * 100.).round() / 100.));
+            ui.label(format!("ps / cell: {}", (secs_per_frame as f64 / WORLD_SIZE.element_product() as f64 / 1e-12 * 100.).round() / 100.));
+            // ui.label("Slider");
+            // ui.add(egui::Slider::new(&mut self.value, 0..=120).text("age"));
+            // ui.label(format!("{}", self.value));
             ui.end_row();
 
             // proto_scene.egui(ui);
         });
+    }
 }

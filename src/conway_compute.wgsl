@@ -44,10 +44,6 @@ fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
         alive = n_alive == 3;
     }
 
-    // alive = n_alive > i32(2);
-    // if (n_alive <= 1) {
-    //     alive = true;
-    // }
     let data = vec4<u32>(u32(alive), 0, 0, 0);
 
     textureStore(output, location, data);

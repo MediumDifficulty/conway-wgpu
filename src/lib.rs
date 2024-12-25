@@ -1,11 +1,11 @@
 pub mod gui;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
-use glam::{uvec2, UVec2};
-use gui::GuiRenderer;
+use glam::{uvec2, vec2, UVec2, Vec2};
+use gui::{GuiRenderer, UiState};
 use rand::Rng;
-use wgpu::{include_wgsl, CommandEncoder, Texture, TextureUsages, TextureView};
+use wgpu::{include_wgsl, util::DeviceExt, CommandEncoder, Texture, TextureUsages, TextureView};
 use winit::{
     application::ApplicationHandler, event::{ElementState, KeyEvent, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
@@ -14,7 +14,8 @@ struct AppState {
     renderer: RendererContext<'static>,
     game_of_life: GameOfLifeState,
     gui: GuiRenderer,
-    window: Arc<Window>, // TODO: I really dislike the use of an `Arc` here but I can't find a way around it
+    ui_state: UiState,
+    window: Arc<Window>, // FIXME: I really dislike the use of an `Arc` here but I can't find a way around it
 }
 
 #[derive(Default)]
@@ -36,6 +37,9 @@ struct GameOfLifeState {
     compute_pipeline: wgpu::ComputePipeline,
     compute_bind_groups: [wgpu::BindGroup; 2],
     frame_polarity: bool,
+    camera: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup
 }
 
 pub fn run() {
@@ -61,7 +65,8 @@ impl AppState {
             game_of_life,
             gui,
             renderer,
-            window
+            window,
+            ui_state: UiState::default()
         }
     }
 }
@@ -97,6 +102,11 @@ impl ApplicationHandler for App {
             None => return
         };
 
+        if state.gui.handle_input(&state.window, &event) {
+            // Event has been consumed
+            return;
+        };
+
         match event {
             WindowEvent::CloseRequested
             | WindowEvent::KeyboardInput {
@@ -108,14 +118,29 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => event_loop.exit(),
+            WindowEvent::KeyboardInput { 
+                event,
+                ..
+            } => match event {
+                KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::F3),
+                    ..
+                } => state.gui.enabled = !state.gui.enabled,
+                _ => {}
+            }
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size);
             }
             WindowEvent::RedrawRequested => {
                 state.window.request_redraw();
-            
-                match state.renderer.render(&state.window, &mut state.gui, &mut state.game_of_life) {
-                    Ok(_) => {}
+                
+                let start_time = Instant::now();
+                match state.render() {
+                    Ok(_) => {
+                        state.ui_state.elapsed_frame_time += start_time.elapsed().as_secs_f32();
+                        state.ui_state.frames += 1;
+                    }
 
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                         state.renderer.resize(state.renderer.size)
@@ -133,11 +158,19 @@ impl ApplicationHandler for App {
             }
             _ => {}
         };
-        state.gui.handle_input(&state.window, &event);
     }
 }
 
-const WORLD_SIZE: UVec2 = uvec2(4096, 4096);
+const WORLD_SIZE: UVec2 = uvec2(8192, 8192);
+
+#[repr(C)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Default, Debug)]
+struct CameraUniform {
+    screen_resolution: Vec2,
+    centre: Vec2,
+    zoom: f32,
+    _padding: u32,
+}
 
 impl GameOfLifeState {
     pub fn new(renderer: &RendererContext) -> Self {
@@ -194,11 +227,47 @@ impl GameOfLifeState {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
+        
+        let mut camera_uniform = CameraUniform::default();
+        camera_uniform.centre = vec2(-100., -1000.);
+
+        let camera_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
+        });
+
+        let camera_bind_group_layout = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    count: None,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None
+                    },
+                    visibility: wgpu::ShaderStages::FRAGMENT
+                }
+            ]
+        });
+
+        let camera_bind_group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding()
+                }
+            ],
+            label: Some("camera_bind_group")
+        });
 
         let render_pipeline_layout =
             renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("render Pipeline Layout"),
-                bind_group_layouts: &[&fragment_bind_group_layout],
+                bind_group_layouts: &[&fragment_bind_group_layout, &camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
         
@@ -240,7 +309,7 @@ impl GameOfLifeState {
             multiview: None,
             cache: None,
         });
-
+        
         let compute_shader = renderer.device.create_shader_module(wgpu::include_wgsl!("conway_compute.wgsl"));
 
         let compute_bind_group_layout = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -334,7 +403,10 @@ impl GameOfLifeState {
             compute_pipeline,
             fragment_bind_groups,
             frame_polarity: false,
-            render_pipeline
+            render_pipeline,
+            camera: camera_uniform,
+            camera_buffer,
+            camera_bind_group
         }
     }
 
@@ -350,10 +422,11 @@ impl GameOfLifeState {
 
             compute_pass.set_pipeline(&self.compute_pipeline);
             compute_pass.set_bind_group(0, &self.compute_bind_groups[self.frame_polarity as usize], &[]);
+            
             compute_pass.dispatch_workgroups(WORLD_SIZE.x / 8, WORLD_SIZE.y / 8, 1);
         }
         renderer.queue.submit(std::iter::once(encoder.finish()));
-            
+        
         {
             let mut render_pass = render_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -372,6 +445,7 @@ impl GameOfLifeState {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.fragment_bind_groups[self.frame_polarity as usize], &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
 
@@ -416,7 +490,8 @@ impl RendererContext<'static> {
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
-
+        
+        println!("{:?}", adapter.get_info());
         println!("{:?}", surface_format);
 
         let config = wgpu::SurfaceConfiguration {
@@ -447,23 +522,24 @@ impl RendererContext<'static> {
             self.surface.configure(&self.device, &self.config);
         }
     }
+}
 
-    fn render(&mut self, window: &Window, gui: &mut GuiRenderer, gol: &mut GameOfLifeState) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
+impl AppState {
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let output = self.renderer.surface.get_current_texture()?;
 
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut render_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut render_encoder = self.renderer.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("render encoder")
         });
 
-        gol.render(self, &view, &mut render_encoder);
+        self.game_of_life.render(&self.renderer, &view, &mut render_encoder);
+        self.gui.draw(&self.renderer, &self.window, |ctx| self.ui_state.draw(ctx), &mut render_encoder, &view);
 
-        gui.draw(window, &self.device, &self.queue, &self.config, gui::gui, &mut render_encoder, &view);
-
-        self.queue.submit(core::iter::once(render_encoder.finish()));
+        self.renderer.queue.submit(core::iter::once(render_encoder.finish()));
 
         output.present();
 

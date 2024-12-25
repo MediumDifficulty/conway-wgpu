@@ -3,11 +3,15 @@ struct VertexOutput {
     @location(0) tex_coords: vec2<f32>,
 };
 
-struct DynamicInfo {
-    screen_resolution: vec2<u32>
+struct CameraUniform {
+    screen_resolution: vec2<f32>,
+    centre: vec2<f32>,
+    zoom: f32
 }
 
+
 @group(0) @binding(0) var world: texture_storage_2d<r32uint, read>;
+@group(1) @binding(0) var<uniform> camera: CameraUniform;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
@@ -29,7 +33,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(vertex: VertexOutput) -> @location(0) vec4<f32> {
-    let colour = textureLoad(world, vec2<i32>(vertex.tex_coords * vec2<f32>(textureDimensions(world)))).r;
+    let colour = textureLoad(world, vec2<i32>(vertex.tex_coords * vec2<f32>(textureDimensions(world)) + camera.centre)).r;
     return vec4<f32>(vec3<f32>(colour), 0.0);
     // return vec4<f32>(vertex.tex_coords, 0.0, 0.0);
 }
