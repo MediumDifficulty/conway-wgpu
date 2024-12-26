@@ -33,7 +33,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(vertex: VertexOutput) -> @location(0) vec4<f32> {
-    let colour = textureLoad(world, vec2<i32>(vertex.tex_coords * vec2<f32>(textureDimensions(world)) + camera.centre)).r;
+    let pos = (vertex.tex_coords * camera.screen_resolution - camera.screen_resolution / 2.) * camera.zoom + camera.centre;
+    let colour = textureLoad(world, vec2<i32>(pos)).r;
     return vec4<f32>(vec3<f32>(colour), 0.0);
     // return vec4<f32>(vertex.tex_coords, 0.0, 0.0);
 }

@@ -1,13 +1,15 @@
 pub mod gui;
+mod rendering_utils;
 
 use std::{sync::Arc, time::Instant};
 
 use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
 use rand::Rng;
-use wgpu::{include_wgsl, util::DeviceExt, CommandEncoder, Texture, TextureUsages, TextureView};
+use rendering_utils::SimpleUniformHelper;
+use wgpu::{include_wgsl, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
 use winit::{
-    application::ApplicationHandler, event::{ElementState, KeyEvent, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
+    application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, KeyEvent, TouchPhase, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
 
 struct AppState {
@@ -20,7 +22,7 @@ struct AppState {
 
 #[derive(Default)]
 pub struct App {
-    state: Option<AppState>
+    state: Option<AppState>,
 }
 
 pub struct RendererContext<'a> {
@@ -37,9 +39,7 @@ struct GameOfLifeState {
     compute_pipeline: wgpu::ComputePipeline,
     compute_bind_groups: [wgpu::BindGroup; 2],
     frame_polarity: bool,
-    camera: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup
+    camera: SimpleUniformHelper<CameraUniform>,
 }
 
 pub fn run() {
@@ -66,7 +66,7 @@ impl AppState {
             gui,
             renderer,
             window,
-            ui_state: UiState::default()
+            ui_state: UiState::default(),
         }
     }
 }
@@ -102,10 +102,10 @@ impl ApplicationHandler for App {
             None => return
         };
 
-        if state.gui.handle_input(&state.window, &event) {
+        if state.gui.handle_input(&state.window, &event) || state.game_of_life.handle_input(&event){
             // Event has been consumed
             return;
-        };
+        }
 
         match event {
             WindowEvent::CloseRequested
@@ -131,10 +131,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size);
+                state.game_of_life.resize(size);
             }
             WindowEvent::RedrawRequested => {
                 state.window.request_redraw();
                 
+                // FIXME: This does not give the time to compute the world update.
+                // Should use timestamp queries.
                 let start_time = Instant::now();
                 match state.render() {
                     Ok(_) => {
@@ -170,6 +173,65 @@ struct CameraUniform {
     centre: Vec2,
     zoom: f32,
     _padding: u32,
+}
+
+impl GameOfLifeState {
+    pub fn handle_input(&mut self, event: &WindowEvent) -> bool {
+        return match event {
+            WindowEvent::MouseWheel { delta, phase: TouchPhase::Moved, .. } => {
+                match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, amount) => self.camera.update_inner(|camera| {
+                        camera.zoom *= 1. - *amount * 0.1;
+                    }),
+                    winit::event::MouseScrollDelta::PixelDelta(physical_position) => self.camera.update_inner(|camera| {
+                        camera.zoom *= 1. - physical_position.y as f32 * 0.1;
+                    }),
+                };
+                true
+            }
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::KeyW) | PhysicalKey::Code(KeyCode::ArrowUp),
+                    ..
+                },
+                ..
+            } => {
+                self.camera.update_inner(|camera| camera.centre.y -= camera.zoom * 10.);
+                true
+            },
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::KeyS) | PhysicalKey::Code(KeyCode::ArrowDown),
+                    ..
+                },
+                ..
+            } => {
+                self.camera.update_inner(|camera| camera.centre.y += camera.zoom * 10.);
+                true
+            },
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::KeyA) | PhysicalKey::Code(KeyCode::ArrowLeft),
+                    ..
+                },
+                ..
+            } => {
+                self.camera.update_inner(|camera| camera.centre.x -= camera.zoom * 10.);
+                true
+            },
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::KeyD) | PhysicalKey::Code(KeyCode::ArrowRight),
+                    ..
+                },
+                ..
+            } => {
+                self.camera.update_inner(|camera| camera.centre.x += camera.zoom * 10.);
+                true
+            },
+            _ => false
+        }
+    }
 }
 
 impl GameOfLifeState {
@@ -228,46 +290,18 @@ impl GameOfLifeState {
             .try_into()
             .unwrap();
         
-        let mut camera_uniform = CameraUniform::default();
-        camera_uniform.centre = vec2(-100., -1000.);
-
-        let camera_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera buffer"),
-            contents: bytemuck::cast_slice(&[camera_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
-        });
-
-        let camera_bind_group_layout = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera_bind_group_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    count: None,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None
-                    },
-                    visibility: wgpu::ShaderStages::FRAGMENT
-                }
-            ]
-        });
-
-        let camera_bind_group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding()
-                }
-            ],
-            label: Some("camera_bind_group")
-        });
+        let camera = SimpleUniformHelper::from_inner(CameraUniform {
+            centre: vec2(0., 0.),
+            zoom: 1.,
+            screen_resolution: vec2(renderer.config.width as f32, renderer.config.height as f32),
+            ..Default::default()
+        }, &renderer.device, ShaderStages::FRAGMENT);
+            
 
         let render_pipeline_layout =
             renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("render Pipeline Layout"),
-                bind_group_layouts: &[&fragment_bind_group_layout, &camera_bind_group_layout],
+                bind_group_layouts: &[&fragment_bind_group_layout, camera.layout()],
                 push_constant_ranges: &[],
             });
         
@@ -404,13 +438,13 @@ impl GameOfLifeState {
             fragment_bind_groups,
             frame_polarity: false,
             render_pipeline,
-            camera: camera_uniform,
-            camera_buffer,
-            camera_bind_group
+            camera
         }
     }
 
     pub fn render(&mut self, renderer: &RendererContext, view: &TextureView, render_encoder: &mut CommandEncoder) {
+        self.camera.update_buffer(&renderer.queue);
+
         let mut encoder = renderer.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Compute Encoder")
         });
@@ -445,11 +479,18 @@ impl GameOfLifeState {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.fragment_bind_groups[self.frame_polarity as usize], &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, self.camera.bind_group(), &[]);
             render_pass.draw(0..3, 0..1);
         }
 
         self.frame_polarity = !self.frame_polarity;
+    }
+
+    pub fn resize(&mut self, size: PhysicalSize<u32>) {
+        self.camera.update_inner(|camera| {
+            camera.screen_resolution.x = size.width as f32;
+            camera.screen_resolution.y = size.height as f32;
+        });
     }
 }
 
