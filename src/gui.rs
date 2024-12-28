@@ -1,7 +1,7 @@
 use egui::{Align2, Context};
 use egui_wgpu::ScreenDescriptor;
 use egui_winit::{winit::{event::WindowEvent, window::Window}, State};
-use wgpu::{CommandEncoder, Device, Queue, SurfaceConfiguration, TextureFormat, TextureView};
+use wgpu::{CommandEncoder, Device, TextureFormat, TextureView};
 
 use crate::{RendererContext, WORLD_SIZE};
 
@@ -130,12 +130,7 @@ impl UiState {
             ui.label(format!("ms / frame: {}ms", ((secs_per_frame * 1000. * 100.).round() / 100.)));
             ui.label(format!("Gc / s: {}", (WORLD_SIZE.element_product() as f64 / secs_per_frame as f64 / 1e9 * 100.).round() / 100.));
             ui.label(format!("ps / cell: {}", (secs_per_frame as f64 / WORLD_SIZE.element_product() as f64 / 1e-12 * 100.).round() / 100.));
-            // ui.label("Slider");
-            // ui.add(egui::Slider::new(&mut self.value, 0..=120).text("age"));
-            // ui.label(format!("{}", self.value));
             ui.end_row();
-
-            // proto_scene.egui(ui);
         });
     }
 }

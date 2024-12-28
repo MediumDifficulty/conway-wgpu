@@ -1,10 +1,12 @@
 pub mod gui;
 mod rendering_utils;
+mod input;
 
-use std::{sync::Arc, time::Instant};
+use std::{sync::Arc, time::{Duration, Instant}};
 
 use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
+use input::KeyboardInputState;
 use rand::Rng;
 use rendering_utils::SimpleUniformHelper;
 use wgpu::{include_wgsl, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
@@ -20,9 +22,18 @@ struct AppState {
     window: Arc<Window>, // FIXME: I really dislike the use of an `Arc` here but I can't find a way around it
 }
 
-#[derive(Default)]
 pub struct App {
+    last_update: Instant,
     state: Option<AppState>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            last_update: Instant::now(),
+            state: None,
+        }
+    }
 }
 
 pub struct RendererContext<'a> {
@@ -40,6 +51,7 @@ struct GameOfLifeState {
     compute_bind_groups: [wgpu::BindGroup; 2],
     frame_polarity: bool,
     camera: SimpleUniformHelper<CameraUniform>,
+    input: KeyboardInputState
 }
 
 pub fn run() {
@@ -135,7 +147,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 state.window.request_redraw();
-                
+                state.game_of_life.step_camera(self.last_update.elapsed());
+
+                self.last_update = Instant::now();
                 // FIXME: This does not give the time to compute the world update.
                 // Should use timestamp queries.
                 let start_time = Instant::now();
@@ -190,51 +204,29 @@ impl GameOfLifeState {
                 true
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(KeyCode::KeyW) | PhysicalKey::Code(KeyCode::ArrowUp),
-                    ..
-                },
+                event,
                 ..
-            } => {
-                self.camera.update_inner(|camera| camera.centre.y -= camera.zoom * 10.);
-                true
-            },
-            WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(KeyCode::KeyS) | PhysicalKey::Code(KeyCode::ArrowDown),
-                    ..
-                },
-                ..
-            } => {
-                self.camera.update_inner(|camera| camera.centre.y += camera.zoom * 10.);
-                true
-            },
-            WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(KeyCode::KeyA) | PhysicalKey::Code(KeyCode::ArrowLeft),
-                    ..
-                },
-                ..
-            } => {
-                self.camera.update_inner(|camera| camera.centre.x -= camera.zoom * 10.);
-                true
-            },
-            WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(KeyCode::KeyD) | PhysicalKey::Code(KeyCode::ArrowRight),
-                    ..
-                },
-                ..
-            } => {
-                self.camera.update_inner(|camera| camera.centre.x += camera.zoom * 10.);
-                true
-            },
+            } => self.input.handle(event),
             _ => false
         }
     }
-}
 
-impl GameOfLifeState {
+    pub fn step_camera(&mut self, delta_time: Duration) {
+        let delta_time = delta_time.as_secs_f32();
+        if self.input.is_pressed(0) {
+            self.camera.update_inner(|camera| camera.centre.y -= camera.zoom * 150. * delta_time);
+        }
+        if self.input.is_pressed(1) {
+            self.camera.update_inner(|camera| camera.centre.x -= camera.zoom * 150. * delta_time);
+        }
+        if self.input.is_pressed(2) {
+            self.camera.update_inner(|camera| camera.centre.y += camera.zoom * 150. * delta_time);
+        }
+        if self.input.is_pressed(3) {
+            self.camera.update_inner(|camera| camera.centre.x += camera.zoom * 150. * delta_time);
+        }
+    }
+
     pub fn new(renderer: &RendererContext) -> Self {
         let textures: [Texture; 2] = (0..2)
             .map(|_| {
@@ -432,13 +424,21 @@ impl GameOfLifeState {
             },
         );
 
+        let input = KeyboardInputState::new(&[
+            &[KeyCode::KeyW, KeyCode::ArrowUp],
+            &[KeyCode::KeyA, KeyCode::ArrowLeft],
+            &[KeyCode::KeyS, KeyCode::ArrowDown],
+            &[KeyCode::KeyD, KeyCode::ArrowRight],
+        ]);
+
         Self {
             compute_bind_groups,
             compute_pipeline,
             fragment_bind_groups,
             frame_polarity: false,
             render_pipeline,
-            camera
+            camera,
+            input
         }
     }
 
