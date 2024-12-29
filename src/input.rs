@@ -1,54 +1,14 @@
 use std::collections::VecDeque;
 
-use gilrs::{ev::{self, AxisOrBtn}, Axis, Gilrs};
-use winit::{event::WindowEvent, keyboard::KeyCode};
-
-#[derive(Clone)]
-pub struct KeyboardInputState {
-    bindings: Vec<Vec<(bool, KeyCode)>>
-}
-
-impl KeyboardInputState {
-    pub fn new(bindings: &[&[KeyCode]]) -> Self {
-        Self {
-            bindings: bindings.iter()
-                .map(|&handler| handler.iter()
-                    .map(|&key| (false, key))
-                    .collect())
-                .collect()
-        }
-    }
-
-    pub fn handle(&mut self, event: &winit::event::KeyEvent) -> bool {
-        let code = match event.physical_key {
-            winit::keyboard::PhysicalKey::Code(key_code) => key_code,
-            winit::keyboard::PhysicalKey::Unidentified(_) => return false,
-        };
-
-        let pressed = event.state.is_pressed();
-
-        let mut consumed = false;
-        for handler in &mut self.bindings {
-            for state in handler.iter_mut()
-                .filter(|key| key.1 == code) {
-                state.0 = pressed;
-                consumed = true
-            }
-        }
-        consumed
-    }
-
-    pub fn is_pressed(&self, idx: usize) -> bool {
-        self.bindings[idx].iter().any(|key| key.0)
-    }
-}
+use gilrs::{ev::AxisOrBtn, Axis, Gilrs};
+use winit::{event::{KeyEvent, MouseButton, WindowEvent}, keyboard::{KeyCode, PhysicalKey}};
 
 /// `T` is a user declared enum to identify different handlers
 pub struct HybridInputState<T> {
     gilrs: Gilrs,
     queue: VecDeque<T>,
-    listeners: Vec<(Vec<ListenerSource>, T)>,
-    bindings: Vec<(Vec<BindingSource>, T)>
+    listeners: Vec<(Vec<InputSource>, T)>,
+    bindings: Vec<(Vec<InputSource>, T)>
 }
 
 pub enum ListenerSource {
@@ -56,54 +16,103 @@ pub enum ListenerSource {
     Gamepad(AxisOrBtn)
 }
 
-pub enum BindingSource {
+#[derive(Clone)]
+pub enum InputSource {
     Key {
         state: bool,
         key: KeyCode
     },
-    GamePadAxis(Axis)
+    GamepadAxis {
+        axis: Axis,
+        mapping: fn(f32) -> f32
+    },
+    GamepadButton(gilrs::Button),
+    Mouse {
+        state: bool,
+        button: MouseButton
+    }
 }
 
+impl InputSource {
+    pub fn key(key: KeyCode) -> Self {
+        Self::Key { state: false, key }
+    }
 
-impl<T> HybridInputState<T> where T: Copy {
+    pub fn axis(axis: Axis, mapping: fn(f32) -> f32) -> Self {
+        Self::GamepadAxis { axis, mapping }
+    }
+
+    /// Updates internal state along with returning if the event was processed
+    fn handle_winit(&mut self, event: &WindowEvent) -> bool {
+        match (event, self) {
+            (
+                WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state: element_state, .. }, .. },
+                InputSource::Key { state, key }
+            ) if code == key => {
+                *state = element_state.is_pressed();
+                true
+            },
+            (
+                WindowEvent::MouseInput { button: mouse_button, state: element_state, .. },
+                InputSource::Mouse { state, button }
+            ) if mouse_button == button => {
+                *state = element_state.is_pressed();
+                true
+            },
+            _ => false
+        }
+    }
+
+    fn matches_gamepad(&self, event: &gilrs::Event) -> bool {
+        matches!((event.event, self), (
+            gilrs::EventType::ButtonPressed(gamepad_button, _),
+            InputSource::GamepadButton(button)
+        ) if gamepad_button == *button)
+    }
+
+    fn pressed_amount(&self, gilrs: &Gilrs) -> f32 {
+        match self {
+            InputSource::Key { state, .. } => *state as u32 as f32,
+            InputSource::Mouse { state, .. } => *state as u32 as f32,
+            InputSource::GamepadAxis { axis, mapping } => gilrs.gamepads().next()
+                .and_then(|(_, gamepad)| gamepad.axis_data(*axis).cloned())
+                .map(|data| mapping(data.value()))
+                .unwrap_or_default(),
+            InputSource::GamepadButton(button) => gilrs.gamepads().next()
+                .and_then(|(_, gamepad)| gamepad.button_data(*button).cloned())
+                .map(|data| data.is_pressed() as u32 as f32)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl<T> HybridInputState<T> where T: Copy + Eq {
+    pub fn new(bindings: &[(&[InputSource], T)], listeners: &[(&[InputSource], T)]) -> Self {
+        Self {
+            gilrs: Gilrs::new().unwrap(),
+            queue: VecDeque::new(),
+            listeners: listeners.iter().map(|(a, b)| (a.to_vec(), *b)).collect(),
+            bindings: bindings.iter().map(|(a, b)| (a.to_vec(), *b)).collect(),
+        }
+    }
+
     pub fn handle_winit(&mut self, event: &WindowEvent) -> bool {
         let mut consumed = false;
-        match event {
-            WindowEvent::KeyboardInput { event, .. } => {
-                let code = match event.physical_key {
-                    winit::keyboard::PhysicalKey::Code(key_code) => key_code,
-                    winit::keyboard::PhysicalKey::Unidentified(_) => return false,
-                };
-        
-                let pressed = event.state.is_pressed();
-        
-                for (sources, _) in &mut self.bindings {
-                    for source in sources.iter_mut() {
-                        match source {
-                            BindingSource::Key { state, key } => if *key == code {
-                                *state = pressed;
-                                consumed = true;
-                            },
-                            _ => {},
-                        }
-                    }
-                }
-        
-                for (sources, ident) in &mut self.listeners {
-                    for source in sources.iter_mut() {
-                        match source {
-                            ListenerSource::Key(key_code) => if *key_code == code {
-                                self.queue.push_front(*ident);
-                                consumed = true;
-                            },
-                            _ => {},
-                        }
-                    }
+
+        for (sources, _) in &mut self.bindings {
+            for source in sources.iter_mut() {
+                consumed |= source.handle_winit(event);
+            }
+        }
+
+        for (sources, ident) in &mut self.listeners {
+            for source in sources.iter_mut() {
+                if source.handle_winit(event) {
+                    self.queue.push_front(*ident);
+                    consumed = true;
                 }
             }
-            // TODO: WindowEvent::MouseInput { device_id, state, button }
-            _ => {}
-        }   
+        }
 
         consumed
     }
@@ -114,20 +123,22 @@ impl<T> HybridInputState<T> where T: Copy {
 
     pub fn update_gamepad(&mut self) {
         while let Some(event) = self.gilrs.next_event() {
-            match event.event {
-                ev::EventType::ButtonPressed(button, code) => todo!(),
-                // ev::EventType::ButtonRepeated(button, code) => todo!(),
-                ev::EventType::ButtonReleased(button, code) => todo!(),
-                ev::EventType::ButtonChanged(button, _, code) => todo!(),
-                ev::EventType::AxisChanged(axis, _, code) => todo!(),
-                // ev::EventType::Connected => todo!(),
-                // ev::EventType::Disconnected => todo!(),
-                _ => todo!(),
+            for (sources, ident) in &mut self.bindings {
+                for source in sources.iter_mut() {
+                    if source.matches_gamepad(&event) {
+                        self.queue.push_front(*ident);
+                    }
+                }
             }
         }
     }
 
     pub fn pressed_amount(&self, ident: T) -> f32 {
-        todo!()
+        self.bindings.iter()
+            .filter(|(_, id)| *id == ident) // TODO: Change this to a find as there *should* only be one ident present
+            .flat_map(|(sources, _)| sources.iter())
+            .map(|source| source.pressed_amount(&self.gilrs))
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap_or_default()
     }
 }

@@ -6,7 +6,7 @@ use std::{sync::Arc, time::{Duration, Instant}};
 
 use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
-use input::KeyboardInputState;
+use input::{HybridInputState, InputSource};
 use rand::Rng;
 use rendering_utils::SimpleUniformHelper;
 use wgpu::{include_wgsl, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
@@ -51,7 +51,15 @@ struct GameOfLifeState {
     compute_bind_groups: [wgpu::BindGroup; 2],
     frame_polarity: bool,
     camera: SimpleUniformHelper<CameraUniform>,
-    input: KeyboardInputState
+    input: HybridInputState<InputIdent>
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputIdent {
+    Up,
+    Down,
+    Left,
+    Right
 }
 
 pub fn run() {
@@ -178,7 +186,7 @@ impl ApplicationHandler for App {
     }
 }
 
-const WORLD_SIZE: UVec2 = uvec2(8192, 8192);
+const WORLD_SIZE: UVec2 = uvec2(128, 128);
 
 #[repr(C)]
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Default, Debug)]
@@ -202,29 +210,21 @@ impl GameOfLifeState {
                     }),
                 };
                 true
+            },
+            _ => {
+                self.input.update_gamepad();
+                self.input.handle_winit(event)
             }
-            WindowEvent::KeyboardInput {
-                event,
-                ..
-            } => self.input.handle(event),
-            _ => false
         }
     }
 
     pub fn step_camera(&mut self, delta_time: Duration) {
         let delta_time = delta_time.as_secs_f32();
-        if self.input.is_pressed(0) {
-            self.camera.update_inner(|camera| camera.centre.y -= camera.zoom * 150. * delta_time);
-        }
-        if self.input.is_pressed(1) {
-            self.camera.update_inner(|camera| camera.centre.x -= camera.zoom * 150. * delta_time);
-        }
-        if self.input.is_pressed(2) {
-            self.camera.update_inner(|camera| camera.centre.y += camera.zoom * 150. * delta_time);
-        }
-        if self.input.is_pressed(3) {
-            self.camera.update_inner(|camera| camera.centre.x += camera.zoom * 150. * delta_time);
-        }
+        
+        self.camera.update_inner(|camera| camera.centre.y -= camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Up));
+        self.camera.update_inner(|camera| camera.centre.y += camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Down));
+        self.camera.update_inner(|camera| camera.centre.x -= camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Left));
+        self.camera.update_inner(|camera| camera.centre.x += camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Right));
     }
 
     pub fn new(renderer: &RendererContext) -> Self {
@@ -424,12 +424,24 @@ impl GameOfLifeState {
             },
         );
 
-        let input = KeyboardInputState::new(&[
-            &[KeyCode::KeyW, KeyCode::ArrowUp],
-            &[KeyCode::KeyA, KeyCode::ArrowLeft],
-            &[KeyCode::KeyS, KeyCode::ArrowDown],
-            &[KeyCode::KeyD, KeyCode::ArrowRight],
-        ]);
+        // let input = KeyboardInputState::new(&[
+        //     &[KeyCode::KeyW, KeyCode::ArrowUp],
+        //     &[KeyCode::KeyA, KeyCode::ArrowLeft],
+        //     &[KeyCode::KeyS, KeyCode::ArrowDown],
+        //     &[KeyCode::KeyD, KeyCode::ArrowRight],
+        // ]);
+
+        const DEAD_ZONE: f32 = 0.2;
+
+        let input = HybridInputState::new(
+            &[
+                (&[InputSource::key(KeyCode::KeyW), InputSource::key(KeyCode::ArrowUp), InputSource::axis(gilrs::Axis::LeftStickY, |a|    (10f32).powf(( a - DEAD_ZONE).max(0.)) - 1.)], InputIdent::Up),
+                (&[InputSource::key(KeyCode::KeyS), InputSource::key(KeyCode::ArrowDown), InputSource::axis(gilrs::Axis::LeftStickY, |a|  (10f32).powf((-a - DEAD_ZONE).max(0.)) - 1.)], InputIdent::Down),
+                (&[InputSource::key(KeyCode::KeyA), InputSource::key(KeyCode::ArrowLeft), InputSource::axis(gilrs::Axis::LeftStickX, |a|  (10f32).powf((-a - DEAD_ZONE).max(0.)) - 1.)], InputIdent::Left),
+                (&[InputSource::key(KeyCode::KeyD), InputSource::key(KeyCode::ArrowRight), InputSource::axis(gilrs::Axis::LeftStickX, |a| (10f32).powf(( a - DEAD_ZONE).max(0.)) - 1.)], InputIdent::Right)
+            ],
+            &[]
+        );
 
         Self {
             compute_bind_groups,
