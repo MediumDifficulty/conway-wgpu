@@ -11,7 +11,8 @@ egui-winit = "0.30.0"
 glam = { version = "0.29.2", features = ["bytemuck"] }
 pollster = "0.4.0"
 rand = "0.8.5"
-wgpu = "23.0.1"
+wgpu = { version = "23.0.1", features = ["naga-ir"] }
 bytemuck = "1.21.0"
 gilrs = "0.11.0"
 bounded-vec-deque = "0.1.1"
+naga_oil = "0.16.0"

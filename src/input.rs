@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use gilrs::{ev::AxisOrBtn, Axis, Gilrs};
+use gilrs::{Axis, Gilrs};
 use winit::{event::{KeyEvent, MouseButton, WindowEvent}, keyboard::{KeyCode, PhysicalKey}};
 
 /// `T` is a user declared enum to identify different handlers
@@ -9,11 +9,6 @@ pub struct HybridInputState<T> {
     queue: VecDeque<T>,
     listeners: Vec<(Vec<InputSource>, T)>,
     bindings: Vec<(Vec<InputSource>, T)>
-}
-
-pub enum ListenerSource {
-    Key(KeyCode),
-    Gamepad(AxisOrBtn)
 }
 
 #[derive(Clone)]

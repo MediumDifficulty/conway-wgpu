@@ -1,9 +1,10 @@
 # TODO
 - [x] Proper time readout (timestamp query)
-- [ ] Bit packing
+- [x] Add naga_oil (https://crates.io/crates/naga_oil)
+  - [ ] Bit packing
   - [ ] Sliding window simulation optimisation?
-- [ ] Mouse interaction with world
 - [ ] Mouse viewport dragging
+  - [ ] Mouse interaction with world
 - [ ] Detach simulation time from rendering
   - [ ] Configurable simulation speed
   - [ ] Simulation pausing

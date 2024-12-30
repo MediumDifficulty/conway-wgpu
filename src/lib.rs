@@ -2,14 +2,15 @@ pub mod gui;
 mod rendering_utils;
 mod input;
 
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{borrow::Cow, sync::Arc, time::{Duration, Instant}};
 
 use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
 use input::{HybridInputState, InputSource};
+use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor};
 use rand::Rng;
 use rendering_utils::{Profiler, SimpleUniformHelper};
-use wgpu::{include_wgsl, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView, QUERY_SET_MAX_QUERIES};
+use wgpu::{CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
 use winit::{
     application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, KeyEvent, TouchPhase, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
@@ -227,6 +228,13 @@ impl GameOfLifeState {
     }
 
     pub fn new(renderer: &RendererContext) -> Self {
+        let mut composer = Composer::default();
+        composer.add_composable_module(ComposableModuleDescriptor {
+            source: include_str!("wgsl/conway_common.wgsl"),
+            file_path: "wgsl/conway_common.wgsl",
+            ..Default::default()
+        }).unwrap();
+
         let textures: [Texture; 2] = (0..2)
             .map(|_| {
                 renderer.device.create_texture(&wgpu::TextureDescriptor {
@@ -296,7 +304,16 @@ impl GameOfLifeState {
                 push_constant_ranges: &[],
             });
         
-        let graphics_shader = renderer.device.create_shader_module(include_wgsl!("conway_renderer.wgsl"));
+
+        let graphics_shader = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Renderer"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(composer.make_naga_module(NagaModuleDescriptor {
+                source: include_str!("wgsl/conway_renderer.wgsl"),
+                file_path: "wgsl/conway_renderer.wgsl",
+                ..Default::default()
+            }).unwrap()))
+        });
+
         let render_pipeline = renderer.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -335,7 +352,14 @@ impl GameOfLifeState {
             cache: None,
         });
         
-        let compute_shader = renderer.device.create_shader_module(wgpu::include_wgsl!("conway_compute.wgsl"));
+        let compute_shader = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Compute"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(composer.make_naga_module(NagaModuleDescriptor {
+                source: include_str!("wgsl/conway_compute.wgsl"),
+                file_path: "wgsl/conway_compute.wgsl",
+                ..Default::default()
+            }).unwrap()))
+        });
 
         let compute_bind_group_layout = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("compute_bind_group_layout"),
@@ -435,7 +459,7 @@ impl GameOfLifeState {
             &[]
         );
     
-        let profiler = Profiler::new(1, 10, &renderer.device, renderer.queue.get_timestamp_period());
+        let profiler = Profiler::new(1, 100, &renderer.device, renderer.queue.get_timestamp_period());
         
         Self {
             compute_bind_groups,

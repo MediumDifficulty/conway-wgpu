@@ -99,8 +99,8 @@ pub struct Profiler {
 impl Profiler {
     pub fn new(operations: usize, frame_count: usize, device: &Device, period: f32) -> Self {
         let buffer_size = operations * 2;
-        assert!(buffer_size < wgpu::QUERY_SET_MAX_QUERIES as usize, "Maximum time set queries exceeded");
-
+        assert!(buffer_size < wgpu::QUERY_SET_MAX_QUERIES as usize, "Maximum set queries exceeded");
+        
         Self {
             operations,
             set: device.create_query_set(&wgpu::QuerySetDescriptor {
