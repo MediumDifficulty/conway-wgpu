@@ -8,8 +8,8 @@ use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
 use input::{HybridInputState, InputSource};
 use rand::Rng;
-use rendering_utils::SimpleUniformHelper;
-use wgpu::{include_wgsl, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
+use rendering_utils::{Profiler, SimpleUniformHelper};
+use wgpu::{include_wgsl, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView, QUERY_SET_MAX_QUERIES};
 use winit::{
     application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, KeyEvent, TouchPhase, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
@@ -51,7 +51,8 @@ struct GameOfLifeState {
     compute_bind_groups: [wgpu::BindGroup; 2],
     frame_polarity: bool,
     camera: SimpleUniformHelper<CameraUniform>,
-    input: HybridInputState<InputIdent>
+    input: HybridInputState<InputIdent>,
+    profiler: Profiler
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,13 +159,9 @@ impl ApplicationHandler for App {
                 state.game_of_life.step_camera(self.last_update.elapsed());
 
                 self.last_update = Instant::now();
-                // FIXME: This does not give the time to compute the world update.
-                // Should use timestamp queries.
-                let start_time = Instant::now();
                 match state.render() {
                     Ok(_) => {
-                        state.ui_state.elapsed_frame_time += start_time.elapsed().as_secs_f32();
-                        state.ui_state.frames += 1;
+                        state.ui_state.update_time_per_frame = state.game_of_life.profiler.average_time(0);
                     }
 
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -186,7 +183,7 @@ impl ApplicationHandler for App {
     }
 }
 
-const WORLD_SIZE: UVec2 = uvec2(128, 128);
+const WORLD_SIZE: UVec2 = uvec2(8192, 8192);
 
 #[repr(C)]
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Default, Debug)]
@@ -221,10 +218,12 @@ impl GameOfLifeState {
     pub fn step_camera(&mut self, delta_time: Duration) {
         let delta_time = delta_time.as_secs_f32();
         
-        self.camera.update_inner(|camera| camera.centre.y -= camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Up));
-        self.camera.update_inner(|camera| camera.centre.y += camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Down));
-        self.camera.update_inner(|camera| camera.centre.x -= camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Left));
-        self.camera.update_inner(|camera| camera.centre.x += camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Right));
+        self.camera.update_inner(|camera| {
+            camera.centre.y -= camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Up);
+            camera.centre.y += camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Down);
+            camera.centre.x -= camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Left);
+            camera.centre.x += camera.zoom * 150. * delta_time * self.input.pressed_amount(InputIdent::Right);
+        });
     }
 
     pub fn new(renderer: &RendererContext) -> Self {
@@ -248,7 +247,7 @@ impl GameOfLifeState {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
-
+            
         let fragment_bind_group_layout =
             renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bind_group_layout"),
@@ -424,13 +423,6 @@ impl GameOfLifeState {
             },
         );
 
-        // let input = KeyboardInputState::new(&[
-        //     &[KeyCode::KeyW, KeyCode::ArrowUp],
-        //     &[KeyCode::KeyA, KeyCode::ArrowLeft],
-        //     &[KeyCode::KeyS, KeyCode::ArrowDown],
-        //     &[KeyCode::KeyD, KeyCode::ArrowRight],
-        // ]);
-
         const DEAD_ZONE: f32 = 0.2;
 
         let input = HybridInputState::new(
@@ -442,7 +434,9 @@ impl GameOfLifeState {
             ],
             &[]
         );
-
+    
+        let profiler = Profiler::new(1, 10, &renderer.device, renderer.queue.get_timestamp_period());
+        
         Self {
             compute_bind_groups,
             compute_pipeline,
@@ -450,7 +444,8 @@ impl GameOfLifeState {
             frame_polarity: false,
             render_pipeline,
             camera,
-            input
+            input,
+            profiler
         }
     }
 
@@ -463,7 +458,7 @@ impl GameOfLifeState {
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
-                timestamp_writes: None
+                timestamp_writes: Some(self.profiler.compute_pass_timestamp_writes(0))
             });
 
             compute_pass.set_pipeline(&self.compute_pipeline);
@@ -471,7 +466,9 @@ impl GameOfLifeState {
             
             compute_pass.dispatch_workgroups(WORLD_SIZE.x / 8, WORLD_SIZE.y / 8, 1);
         }
+        self.profiler.resolve(&mut encoder);
         renderer.queue.submit(std::iter::once(encoder.finish()));
+        self.profiler.process_results(&renderer.device);
         
         {
             let mut render_pass = render_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -525,7 +522,7 @@ impl RendererContext<'static> {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+                    required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
                     required_limits: wgpu::Limits::default(),
                     label: None,
                     memory_hints: wgpu::MemoryHints::default(),

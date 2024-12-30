@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use egui::{Align2, Context};
 use egui_wgpu::ScreenDescriptor;
 use egui_winit::{winit::{event::WindowEvent, window::Window}, State};
@@ -106,17 +108,11 @@ impl GuiRenderer {
 
 #[derive(Default)]
 pub struct UiState {
-    pub elapsed_frame_time: f32,
-    pub frames: usize
+    pub update_time_per_frame: Duration
 }
 
 impl UiState {
     pub fn draw(&mut self, ctx: &Context) {
-        if self.elapsed_frame_time > 1. {
-            self.frames = 0;
-            self.elapsed_frame_time = 0.;
-        }
-
         egui::Window::new("Settings")
         // .vscroll(true)
         .default_open(true)
@@ -126,10 +122,11 @@ impl UiState {
         .resizable(true)
         .anchor(Align2::LEFT_TOP, [0.0, 0.0])
         .show(&ctx, |ui| {
-            let secs_per_frame = self.elapsed_frame_time / self.frames as f32;
+            let secs_per_frame = self.update_time_per_frame.as_secs_f32();
             ui.label(format!("ms / frame: {}ms", ((secs_per_frame * 1000. * 100.).round() / 100.)));
             ui.label(format!("Gc / s: {}", (WORLD_SIZE.element_product() as f64 / secs_per_frame as f64 / 1e9 * 100.).round() / 100.));
             ui.label(format!("ps / cell: {}", (secs_per_frame as f64 / WORLD_SIZE.element_product() as f64 / 1e-12 * 100.).round() / 100.));
+            ui.label(format!("max FPS: {}", (1. / secs_per_frame * 100.).round() / 100.));
             ui.end_row();
         });
     }
