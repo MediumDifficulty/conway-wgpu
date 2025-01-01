@@ -1,7 +1,7 @@
 # TODO
 - [x] Proper time readout (timestamp query)
 - [x] Add naga_oil (https://crates.io/crates/naga_oil)
-  - [ ] Bit packing
+  - [x] Bit packing
   - [ ] Sliding window simulation optimisation?
 - [ ] Mouse viewport dragging
   - [ ] Mouse interaction with world

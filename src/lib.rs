@@ -184,7 +184,8 @@ impl ApplicationHandler for App {
     }
 }
 
-const WORLD_SIZE: UVec2 = uvec2(8192, 8192);
+const WORLD_WIDTH: u32 = 1 << 15;
+const WORLD_SIZE: UVec2 = uvec2(WORLD_WIDTH, WORLD_WIDTH);
 
 #[repr(C)]
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Default, Debug)]
@@ -194,6 +195,8 @@ struct CameraUniform {
     zoom: f32,
     _padding: u32,
 }
+
+const BITS_PER_PIXEL: u32 = 32;
 
 impl GameOfLifeState {
     pub fn handle_input(&mut self, event: &WindowEvent) -> bool {
@@ -240,7 +243,7 @@ impl GameOfLifeState {
                 renderer.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
-                        width: WORLD_SIZE.x,
+                        width: WORLD_SIZE.x / BITS_PER_PIXEL,
                         height: WORLD_SIZE.y,
                         depth_or_array_layers: 1,
                     },
@@ -290,7 +293,7 @@ impl GameOfLifeState {
             .unwrap();
         
         let camera = SimpleUniformHelper::from_inner(CameraUniform {
-            centre: vec2(0., 0.),
+            centre: (WORLD_SIZE / 2).as_vec2(),
             zoom: 1.,
             screen_resolution: vec2(renderer.config.width as f32, renderer.config.height as f32),
             ..Default::default()
@@ -358,7 +361,7 @@ impl GameOfLifeState {
                 source: include_str!("wgsl/conway_compute.wgsl"),
                 file_path: "wgsl/conway_compute.wgsl",
                 ..Default::default()
-            }).unwrap()))
+            }).map_err(|e| e.to_string()).unwrap()))
         });
 
         let compute_bind_group_layout = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -432,17 +435,17 @@ impl GameOfLifeState {
                 aspect: wgpu::TextureAspect::All,
                 origin: wgpu::Origin3d::ZERO,
             },
-            &(0..WORLD_SIZE.element_product())
-                .flat_map(|_| (rng.gen_bool(0.3) as u32).to_le_bytes())
+            &(0..(WORLD_SIZE.x / BITS_PER_PIXEL) * WORLD_SIZE.y)
+                .flat_map(|_| if rng.gen_bool(0.1) { rng.gen::<u32>() } else { 0 }.to_le_bytes())
                 .collect::<Vec<_>>(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(WORLD_SIZE.x * size_of::<u32>() as u32),
+                bytes_per_row: Some(WORLD_SIZE.x / BITS_PER_PIXEL * size_of::<u32>() as u32),
                 rows_per_image: Some(WORLD_SIZE.y),
             },
             wgpu::Extent3d {
                 depth_or_array_layers: 1,
-                width: WORLD_SIZE.x,
+                width: WORLD_SIZE.x / BITS_PER_PIXEL,
                 height: WORLD_SIZE.y,
             },
         );
@@ -488,7 +491,7 @@ impl GameOfLifeState {
             compute_pass.set_pipeline(&self.compute_pipeline);
             compute_pass.set_bind_group(0, &self.compute_bind_groups[self.frame_polarity as usize], &[]);
             
-            compute_pass.dispatch_workgroups(WORLD_SIZE.x / 8, WORLD_SIZE.y / 8, 1);
+            compute_pass.dispatch_workgroups(WORLD_SIZE.x / 8 / BITS_PER_PIXEL, WORLD_SIZE.y / 8, 1);
         }
         self.profiler.resolve(&mut encoder);
         renderer.queue.submit(std::iter::once(encoder.finish()));
@@ -515,7 +518,7 @@ impl GameOfLifeState {
             render_pass.set_bind_group(1, self.camera.bind_group(), &[]);
             render_pass.draw(0..3, 0..1);
         }
-
+        
         self.frame_polarity = !self.frame_polarity;
     }
 
@@ -547,7 +550,10 @@ impl RendererContext<'static> {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: WORLD_SIZE.y,
+                        ..Default::default()
+                    },
                     label: None,
                     memory_hints: wgpu::MemoryHints::default(),
                 },

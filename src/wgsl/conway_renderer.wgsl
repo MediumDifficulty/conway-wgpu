@@ -1,8 +1,10 @@
+#import common
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
 };
-// asdf
+
 struct CameraUniform {
     screen_resolution: vec2<f32>,
     centre: vec2<f32>,
@@ -33,8 +35,13 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(vertex: VertexOutput) -> @location(0) vec4<f32> {
-    let pos = (vertex.tex_coords * camera.screen_resolution - camera.screen_resolution / 2.) * camera.zoom + camera.centre;
-    let colour = textureLoad(world, vec2<i32>(pos)).r;
-    return vec4<f32>(vec3<f32>(colour), 0.0);
-    // return vec4<f32>(vertex.tex_coords, 0.0, 0.0);
+    let pos = vec2i((vertex.tex_coords * camera.screen_resolution - camera.screen_resolution / 2.) * camera.zoom + camera.centre);
+    let pixel_pos = vec2i(pos.x / i32(common::BITS_PER_PIXEL), pos.y);
+    let pixel = textureLoad(world, pixel_pos).r;
+
+    let colour = (pixel >> (common::BITS_PER_PIXEL - 1 - (u32(pos.x) % common::BITS_PER_PIXEL))) & 1u;
+
+    // let boundary = pos.x % i32(common::BITS_PER_PIXEL) == 0;
+
+    return vec4<f32>(vec3<f32>(colour), 0);
 }
