@@ -11,9 +11,24 @@ struct CameraUniform {
     zoom: f32
 }
 
-
+#ifdef USE_BUFFER
+@group(0) @binding(0) var<storage, read> world: array<u32>;
+#else
 @group(0) @binding(0) var world: texture_storage_2d<r32uint, read>;
+#endif
 @group(1) @binding(0) var<uniform> camera: CameraUniform;
+
+fn get_pixel(pixel_loc: vec2i) -> u32 {
+    #ifdef USE_BUFFER
+    if (any(pixel_loc < 0)) {
+        return 0;
+    } else {
+        return input[pixel_loc.y * WORLD_WIDTH + pixel_loc.x];
+    }
+    #else
+    return textureLoad(world, pixel_loc).r;
+    #endif
+}
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
@@ -37,7 +52,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(vertex: VertexOutput) -> @location(0) vec4<f32> {
     let pos = vec2i((vertex.tex_coords * camera.screen_resolution - camera.screen_resolution / 2.) * camera.zoom + camera.centre);
     let pixel_pos = vec2i(pos.x / i32(common::BITS_PER_PIXEL), pos.y);
-    let pixel = textureLoad(world, pixel_pos).r;
+    let pixel = get_pixel(pixel_pos);
 
     let colour = (pixel >> (common::BITS_PER_PIXEL - 1 - (u32(pos.x) % common::BITS_PER_PIXEL))) & 1u;
 

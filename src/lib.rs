@@ -2,15 +2,15 @@ pub mod gui;
 mod rendering_utils;
 mod input;
 
-use std::{borrow::Cow, sync::Arc, time::{Duration, Instant}};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::{Duration, Instant}};
 
 use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
 use input::{HybridInputState, InputSource};
-use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor};
+use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderDefValue};
 use rand::Rng;
 use rendering_utils::{Profiler, SimpleUniformHelper};
-use wgpu::{CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
+use wgpu::{util::{BufferInitDescriptor, DeviceExt}, BufferUsages, CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
 use winit::{
     application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, KeyEvent, TouchPhase, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
@@ -42,7 +42,8 @@ pub struct RendererContext<'a> {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    size: winit::dpi::PhysicalSize<u32>,   
+    size: winit::dpi::PhysicalSize<u32>,
+    limits: wgpu::Limits
 }
 
 struct GameOfLifeState {
@@ -184,7 +185,7 @@ impl ApplicationHandler for App {
     }
 }
 
-const WORLD_WIDTH: u32 = 1 << 15;
+const WORLD_WIDTH: u32 = 1 << 16;
 const WORLD_SIZE: UVec2 = uvec2(WORLD_WIDTH, WORLD_WIDTH);
 
 #[repr(C)]
@@ -238,59 +239,18 @@ impl GameOfLifeState {
             ..Default::default()
         }).unwrap();
 
-        let textures: [Texture; 2] = (0..2)
-            .map(|_| {
-                renderer.device.create_texture(&wgpu::TextureDescriptor {
-                    label: None,
-                    size: wgpu::Extent3d {
-                        width: WORLD_SIZE.x / BITS_PER_PIXEL,
-                        height: WORLD_SIZE.y,
-                        depth_or_array_layers: 1,
-                    },
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R32Uint,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST,
-                    view_formats: &[],
-                })
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-            
-        let fragment_bind_group_layout =
-            renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bind_group_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    count: None,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: wgpu::TextureFormat::R32Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                }],
-            });
+        let mut rng = rand::thread_rng();
+        let world = World::auto(
+            renderer.limits.max_texture_dimension_2d,
+            &renderer.device,
+            &renderer.queue,
+            &(0..(WORLD_SIZE.x / BITS_PER_PIXEL) * WORLD_SIZE.y)
+                .flat_map(|_| if rng.gen_bool(0.1) { rng.gen::<u32>() } else { 0 }.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
 
-        let fragment_bind_groups = textures
-            .iter()
-            .map(|texture| {
-                renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(
-                            &texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                        ),
-                    }],
-                    label: Some("bind_group"),
-                    layout: &fragment_bind_group_layout,
-                })
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+        let fragment_bind_group_layout = world.fragment_bind_group_layout(&renderer.device);
+        let fragment_bind_groups = world.fragment_bind_groups(&renderer.device, &fragment_bind_group_layout);
         
         let camera = SimpleUniformHelper::from_inner(CameraUniform {
             centre: (WORLD_SIZE / 2).as_vec2(),
@@ -313,10 +273,11 @@ impl GameOfLifeState {
             source: wgpu::ShaderSource::Naga(Cow::Owned(composer.make_naga_module(NagaModuleDescriptor {
                 source: include_str!("wgsl/conway_renderer.wgsl"),
                 file_path: "wgsl/conway_renderer.wgsl",
+                shader_defs: world.shader_defs(),
                 ..Default::default()
             }).unwrap()))
         });
-
+        
         let render_pipeline = renderer.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -360,57 +321,14 @@ impl GameOfLifeState {
             source: wgpu::ShaderSource::Naga(Cow::Owned(composer.make_naga_module(NagaModuleDescriptor {
                 source: include_str!("wgsl/conway_compute.wgsl"),
                 file_path: "wgsl/conway_compute.wgsl",
+                shader_defs: world.shader_defs(),
                 ..Default::default()
             }).map_err(|e| e.to_string()).unwrap()))
         });
+        
+        let compute_bind_group_layout = world.compute_bind_group_layout(&renderer.device);
 
-        let compute_bind_group_layout = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("compute_bind_group_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    count: None,
-                    ty: wgpu::BindingType::StorageTexture { 
-                        access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: wgpu::TextureFormat::R32Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2
-                    },
-                    visibility: wgpu::ShaderStages::COMPUTE
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    count: None,
-                    ty: wgpu::BindingType::StorageTexture { 
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::R32Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2
-                    },
-                    visibility: wgpu::ShaderStages::COMPUTE
-                },
-            ]
-        });
-
-        let compute_bind_groups = [[&textures[0], &textures[1]], [&textures[1], &textures[0]]]
-            .into_iter()
-            .map(|[texture_a, texture_b]| {
-                renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&texture_a.create_view(&wgpu::TextureViewDescriptor::default()))
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&texture_b.create_view(&wgpu::TextureViewDescriptor::default()))
-                        }
-                    ],
-                    layout: &compute_bind_group_layout
-                })
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+        let compute_bind_groups = world.compute_bind_groups(&renderer.device, &compute_bind_group_layout);
         
         let compute_pipeline_layout = renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             bind_group_layouts: &[&compute_bind_group_layout],
@@ -426,29 +344,6 @@ impl GameOfLifeState {
             layout: Some(&compute_pipeline_layout),
             module: &compute_shader
         });
-
-        let mut rng = rand::thread_rng();
-        renderer.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &textures[0],
-                mip_level: 0,
-                aspect: wgpu::TextureAspect::All,
-                origin: wgpu::Origin3d::ZERO,
-            },
-            &(0..(WORLD_SIZE.x / BITS_PER_PIXEL) * WORLD_SIZE.y)
-                .flat_map(|_| if rng.gen_bool(0.1) { rng.gen::<u32>() } else { 0 }.to_le_bytes())
-                .collect::<Vec<_>>(),
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(WORLD_SIZE.x / BITS_PER_PIXEL * size_of::<u32>() as u32),
-                rows_per_image: Some(WORLD_SIZE.y),
-            },
-            wgpu::Extent3d {
-                depth_or_array_layers: 1,
-                width: WORLD_SIZE.x / BITS_PER_PIXEL,
-                height: WORLD_SIZE.y,
-            },
-        );
 
         const DEAD_ZONE: f32 = 0.2;
 
@@ -530,6 +425,229 @@ impl GameOfLifeState {
     }
 }
 
+enum World {
+    Texture([wgpu::Texture; 2]),
+    Buffer([wgpu::Buffer; 2])
+}
+
+impl World {
+    pub fn auto(max_texture_size: u32, device: &wgpu::Device, queue: &wgpu::Queue, init: &[u8]) -> Self {
+        if WORLD_SIZE.max_element() > max_texture_size {
+            Self::Buffer([device.create_buffer_init(&BufferInitDescriptor {
+                contents: init,
+                label: None,
+                usage: BufferUsages::STORAGE
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                mapped_at_creation: false,
+                size: init.len() as u64 / 4,
+                usage: BufferUsages::STORAGE
+            })])
+        } else {
+            let desc = wgpu::TextureDescriptor {
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Uint,
+                label: None,
+                mip_level_count: 1,
+                sample_count: 1,
+                size: wgpu::Extent3d {
+                    depth_or_array_layers: 1,
+                    width: WORLD_SIZE.x / BITS_PER_PIXEL,
+                    height: WORLD_SIZE.y
+                },
+                usage: TextureUsages::STORAGE_BINDING,
+                view_formats: &[]
+            };
+
+            Self::Texture([
+                device.create_texture_with_data(queue, &desc, wgpu::util::TextureDataOrder::default(), init),
+                device.create_texture(&desc)
+            ])
+        }
+    }
+
+    pub fn fragment_bind_group_layout(&self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        match self {
+            World::Texture(_) => device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    count: None,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: wgpu::TextureFormat::R32Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                }],
+            }),
+            World::Buffer(_) => device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    count: None,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None
+                    },
+                }],
+            }),
+        }
+    }
+
+    pub fn fragment_bind_groups(&self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> [wgpu::BindGroup; 2] {
+        match self {
+            World::Texture(textures) => textures
+                .iter()
+                .map(|texture| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                            ),
+                        }],
+                        label: Some("bind_group"),
+                        layout: &layout,
+                    })
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            World::Buffer(buffers) => buffers
+                .iter()
+                .map(|buffer| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding()
+                        }],
+                        label: Some("bind_group"),
+                        layout: &layout,
+                    })
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        }
+    }
+
+    pub fn compute_bind_group_layout(&self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        match self {
+            World::Texture(_) => device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("compute_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        count: None,
+                        ty: wgpu::BindingType::StorageTexture { 
+                            access: wgpu::StorageTextureAccess::ReadOnly,
+                            format: wgpu::TextureFormat::R32Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2
+                        },
+                        visibility: wgpu::ShaderStages::COMPUTE
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        count: None,
+                        ty: wgpu::BindingType::StorageTexture { 
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2
+                        },
+                        visibility: wgpu::ShaderStages::COMPUTE
+                    },
+                ]
+            }),
+            World::Buffer(_) => device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("compute_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        count: None,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None
+                        },
+                        visibility: wgpu::ShaderStages::COMPUTE
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        count: None,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None
+                        },
+                        visibility: wgpu::ShaderStages::COMPUTE
+                    },
+                ]
+            }),
+        }
+    }
+
+    pub fn compute_bind_groups(&self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> [wgpu::BindGroup; 2] {
+        match self {
+            World::Texture(textures) => [[&textures[0], &textures[1]], [&textures[1], &textures[0]]]
+                .into_iter()
+                .map(|[texture_a, texture_b]| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&texture_a.create_view(&wgpu::TextureViewDescriptor::default()))
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&texture_b.create_view(&wgpu::TextureViewDescriptor::default()))
+                            }
+                        ],
+                        layout: &layout
+                    })
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            World::Buffer(buffers) => [[&buffers[0], &buffers[1]], [&buffers[1], &buffers[0]]]
+                .into_iter()
+                .map(|[buffer_a, buffer_b]| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: buffer_a.as_entire_binding()
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: buffer_b.as_entire_binding()
+                            }
+                        ],
+                        layout: &layout
+                    })
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        }
+    }
+
+    pub fn shader_defs(&self) -> HashMap<String, ShaderDefValue> {
+        match self {
+            World::Texture(_) => HashMap::new(),
+            World::Buffer(_) => HashMap::from([
+                    ("USE_BUFFER".into(), ShaderDefValue::Bool(true)),
+                    ("WORLD_WIDTH".into(), ShaderDefValue::UInt(WORLD_SIZE.x))
+                ])
+        }
+    }
+}
+
 impl RendererContext<'static> {
     async fn new(window: Arc<Window>, instance: &wgpu::Instance) -> RendererContext<'static> {
         let size = window.inner_size();
@@ -544,14 +662,32 @@ impl RendererContext<'static> {
             })
             .await
             .unwrap();
+        
+        let limits = adapter.limits();
+        
+            println!("{:#?}", adapter.limits());
 
+        let max_buffer_size = if WORLD_SIZE.y > limits.max_texture_dimension_2d {
+            println!("World size too big for texture. Using buffers.");
+            WORLD_SIZE.as_u64vec2().element_product() * (BITS_PER_PIXEL / 8) as u64
+        } else {
+            wgpu::Limits::default().max_buffer_size
+        };
+
+        println!("{}", max_buffer_size as u32);
         // Connection to the device
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
                     required_limits: wgpu::Limits {
-                        max_texture_dimension_2d: WORLD_SIZE.y,
+                        max_texture_dimension_2d: if WORLD_SIZE.y > limits.max_texture_dimension_2d {
+                            8192
+                        } else {
+                            WORLD_SIZE.y
+                        },
+                        max_buffer_size: max_buffer_size,
+                        max_storage_buffer_binding_size: max_buffer_size as u32,
                         ..Default::default()
                     },
                     label: None,
@@ -584,13 +720,14 @@ impl RendererContext<'static> {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-
+        
         Self {
             config,
             device,
             queue,
             size,
             surface,
+            limits
         }
     }
 
