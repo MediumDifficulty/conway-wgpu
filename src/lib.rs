@@ -2,7 +2,7 @@ pub mod gui;
 mod rendering_utils;
 mod input;
 
-use std::{borrow::Cow, sync::Arc, time::{Duration, Instant}};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::{Duration, Instant}, u64};
 
 use glam::{uvec2, vec2, UVec2, Vec2};
 use gui::{GuiRenderer, UiState};
@@ -10,6 +10,7 @@ use input::{HybridInputState, InputSource};
 use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor};
 use rand::Rng;
 use rendering_utils::{Profiler, SimpleUniformHelper};
+use static_assertions::const_assert;
 use wgpu::{CommandEncoder, ShaderStages, Texture, TextureUsages, TextureView};
 use winit::{
     application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, KeyEvent, TouchPhase, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::Window
@@ -184,8 +185,15 @@ impl ApplicationHandler for App {
     }
 }
 
-const WORLD_WIDTH: u32 = 1 << 15;
+const WORLD_WIDTH: u32 = 1 << 8;
 const WORLD_SIZE: UVec2 = uvec2(WORLD_WIDTH, WORLD_WIDTH);
+
+const_assert!(WORLD_WIDTH % 64 == 0);
+
+const PIXEL_WIDTH: u32 = 8;
+const WORKGROUP_SIZE: u32 = 8;
+const TEXTURE_SIZE: UVec2 = uvec2(WORLD_WIDTH / PIXEL_WIDTH, WORLD_WIDTH / PIXEL_WIDTH);
+const WORKGROUP_DIMS: UVec2 = uvec2(WORLD_WIDTH / PIXEL_WIDTH / WORKGROUP_SIZE, WORLD_WIDTH / PIXEL_WIDTH / WORKGROUP_SIZE);
 
 #[repr(C)]
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Default, Debug)]
@@ -195,8 +203,6 @@ struct CameraUniform {
     zoom: f32,
     _padding: u32,
 }
-
-const BITS_PER_PIXEL: u32 = 32;
 
 impl GameOfLifeState {
     pub fn handle_input(&mut self, event: &WindowEvent) -> bool {
@@ -243,12 +249,12 @@ impl GameOfLifeState {
                 renderer.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
-                        width: WORLD_SIZE.x / BITS_PER_PIXEL,
-                        height: WORLD_SIZE.y,
+                        width: TEXTURE_SIZE.x,
+                        height: TEXTURE_SIZE.y,
                         depth_or_array_layers: 1,
                     },
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R32Uint,
+                    format: wgpu::TextureFormat::Rg32Uint,
                     mip_level_count: 1,
                     sample_count: 1,
                     usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST,
@@ -268,7 +274,7 @@ impl GameOfLifeState {
                     count: None,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: wgpu::TextureFormat::R32Uint,
+                        format: wgpu::TextureFormat::Rg32Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
                 }],
@@ -307,12 +313,14 @@ impl GameOfLifeState {
                 push_constant_ranges: &[],
             });
         
-
+        let mut defs = HashMap::new();
+        // defs.insert("DEBUG".into(), Default::default());
         let graphics_shader = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Renderer"),
             source: wgpu::ShaderSource::Naga(Cow::Owned(composer.make_naga_module(NagaModuleDescriptor {
                 source: include_str!("wgsl/conway_renderer.wgsl"),
                 file_path: "wgsl/conway_renderer.wgsl",
+                shader_defs: defs,
                 ..Default::default()
             }).unwrap()))
         });
@@ -372,7 +380,7 @@ impl GameOfLifeState {
                     count: None,
                     ty: wgpu::BindingType::StorageTexture { 
                         access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: wgpu::TextureFormat::R32Uint,
+                        format: wgpu::TextureFormat::Rg32Uint,
                         view_dimension: wgpu::TextureViewDimension::D2
                     },
                     visibility: wgpu::ShaderStages::COMPUTE
@@ -382,7 +390,7 @@ impl GameOfLifeState {
                     count: None,
                     ty: wgpu::BindingType::StorageTexture { 
                         access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::R32Uint,
+                        format: wgpu::TextureFormat::Rg32Uint,
                         view_dimension: wgpu::TextureViewDimension::D2
                     },
                     visibility: wgpu::ShaderStages::COMPUTE
@@ -435,18 +443,18 @@ impl GameOfLifeState {
                 aspect: wgpu::TextureAspect::All,
                 origin: wgpu::Origin3d::ZERO,
             },
-            &(0..(WORLD_SIZE.x / BITS_PER_PIXEL) * WORLD_SIZE.y)
-                .flat_map(|_| if rng.gen_bool(0.1) { rng.gen::<u32>() } else { 0 }.to_le_bytes())
+            &(0..TEXTURE_SIZE.element_product())
+                .flat_map(|_| if rng.gen_bool(0.4) { rng.gen::<u64>() } else { 0 }.to_le_bytes())
                 .collect::<Vec<_>>(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(WORLD_SIZE.x / BITS_PER_PIXEL * size_of::<u32>() as u32),
-                rows_per_image: Some(WORLD_SIZE.y),
+                bytes_per_row: Some(TEXTURE_SIZE.x * 2*size_of::<u32>() as u32),
+                rows_per_image: Some(TEXTURE_SIZE.y),
             },
             wgpu::Extent3d {
                 depth_or_array_layers: 1,
-                width: WORLD_SIZE.x / BITS_PER_PIXEL,
-                height: WORLD_SIZE.y,
+                width: TEXTURE_SIZE.x,
+                height: TEXTURE_SIZE.y,
             },
         );
 
@@ -491,7 +499,7 @@ impl GameOfLifeState {
             compute_pass.set_pipeline(&self.compute_pipeline);
             compute_pass.set_bind_group(0, &self.compute_bind_groups[self.frame_polarity as usize], &[]);
             
-            compute_pass.dispatch_workgroups(WORLD_SIZE.x / 8 / BITS_PER_PIXEL, WORLD_SIZE.y / 8, 1);
+            // compute_pass.dispatch_workgroups(WORKGROUP_DIMS.x, WORKGROUP_DIMS.y, 1);
         }
         self.profiler.resolve(&mut encoder);
         renderer.queue.submit(std::iter::once(encoder.finish()));
@@ -514,12 +522,12 @@ impl GameOfLifeState {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.fragment_bind_groups[self.frame_polarity as usize], &[]);
+            render_pass.set_bind_group(0, &self.fragment_bind_groups[0], &[]);
             render_pass.set_bind_group(1, self.camera.bind_group(), &[]);
             render_pass.draw(0..3, 0..1);
         }
         
-        self.frame_polarity = !self.frame_polarity;
+        // self.frame_polarity = !self.frame_polarity;
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -551,7 +559,7 @@ impl RendererContext<'static> {
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
                     required_limits: wgpu::Limits {
-                        max_texture_dimension_2d: WORLD_SIZE.y,
+                        max_texture_dimension_2d: TEXTURE_SIZE.max_element().max(8192),
                         ..Default::default()
                     },
                     label: None,

@@ -344,6 +344,7 @@ dependencies = [
  "naga_oil",
  "pollster",
  "rand",
+ "static_assertions",
  "wgpu",
  "winit",
 ]

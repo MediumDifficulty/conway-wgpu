@@ -3,9 +3,11 @@
 - [x] Add naga_oil (https://crates.io/crates/naga_oil)
   - [x] Bit packing
   - [ ] Sliding window simulation optimisation?
+- [ ] Texture tiling / Buffer / 1:1 pixel : world chunk ratio / 3d texture / buffer
 - [ ] Mouse viewport dragging
   - [ ] Mouse interaction with world
 - [ ] Detach simulation time from rendering
   - [ ] Configurable simulation speed
   - [ ] Simulation pausing
 - [ ] Web version
+- [ ] Migrate to ECS

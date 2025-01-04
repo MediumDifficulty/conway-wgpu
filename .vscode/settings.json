@@ -10,5 +10,8 @@
     // "wgsl-analyzer.inlayHints.enabled": true,
     // "wgsl-analyzer.inlayHints.parameterHints": true,
     // "wgsl-analyzer.inlayHints.structLayoutHints": true,
-    "wgsl-analyzer.diagnostics.nagaVersion": "main"
+    "wgsl-analyzer.diagnostics.nagaVersion": "main",
+    "wgsl-analyzer.preprocessor.shaderDefs": [
+        "DEBUG"
+    ]
 }
